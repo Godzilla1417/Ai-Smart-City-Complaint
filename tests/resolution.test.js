@@ -92,6 +92,18 @@ test('admin submission validates image bytes and rejects spoofed formats', async
   assert.match(res.data.error, /contents do not match/);
 });
 
+test('server rejects a resolution photo above the per-image size limit', async () => {
+  installSupabaseMock();
+  const oversized = Buffer.concat([Buffer.from([0xff, 0xd8, 0xff]), Buffer.alloc(1_500_001)]);
+  const res = responseStub();
+  await resolutionHandler({
+    method: 'POST', query: { id: complaintId }, headers: { 'x-admin-token': adminToken() },
+    body: { action: 'submit', description: 'The pipe joint was replaced and tested.', department: 'Water Utilities', completedAt: new Date().toISOString(), photos: [`data:image/jpeg;base64,${oversized.toString('base64')}`] }
+  }, res);
+  assert.equal(res.statusCode, 400);
+  assert.match(res.data.error, /1.5 MB or smaller/);
+});
+
 test('multiple real-format photo uploads stay pending until a separate verification', async () => {
   const observed = {};
   installSupabaseMock({ ...originalComplaint }, observed);
