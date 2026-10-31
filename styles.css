@@ -35,3 +35,16 @@
   from{transform:translateY(0)}
   to{transform:translateY(-4px)}
 }
+
+/* Refined status connector and interaction polish */
+.stepper:after{content:"";height:2px;background:linear-gradient(90deg,var(--cyan),#35c79a);position:absolute;left:9%;top:10px;width:var(--step-progress,0%);transition:width .35s ease;z-index:0}
+.stepper:before{left:12.5%;right:12.5%}
+.stepper:after{left:12.5%}
+.step{z-index:1}
+.trust-line{gap:9px}
+.trust-check{width:22px;height:22px;display:grid;place-items:center;border-radius:50%;background:#e8f8ef;color:#199f73;font-size:10px}
+.category-card,.panel,.tracking-card{box-shadow:0 8px 28px #16314b08}
+.category-card{border-radius:15px}
+.category-card:hover{box-shadow:0 16px 34px #16314b12}
+.btn:focus-visible,.category-card:focus-visible,input:focus-visible,select:focus-visible,textarea:focus-visible{outline:3px solid #06b6d43b;outline-offset:2px}
+@media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important;animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}

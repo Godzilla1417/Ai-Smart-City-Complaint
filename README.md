@@ -1,6 +1,6 @@
 # CivicFlow
 
-CivicFlow is a responsive single-page frontend demo for a smart city complaint workflow. It uses semantic HTML, custom CSS and a vanilla JavaScript state engine. In this checked-out project, there are currently no Python/FastAPI files, PostgreSQL models, environment files, or API routes; complaint and citizen records are stored in `localStorage` until a backend contract is available.
+CivicFlow is a responsive single-page complaint workflow built with semantic HTML, custom CSS and vanilla JavaScript. On Vercel, complaint data is stored in Supabase Postgres through server-side Vercel Functions. Local development keeps using browser `localStorage` unless the app is run with Vercel Functions.
 
 ## Run locally
 
@@ -19,7 +19,7 @@ CivicFlow is a responsive single-page frontend demo for a smart city complaint w
 
 3. Open `http://localhost:8000` (or the URL printed by `serve`). Use a local server for browser geolocation; browsers generally restrict that feature to secure contexts such as `localhost`.
 
-The page loads Font Awesome, Google Fonts, Chart.js and Leaflet from CDNs, so those assets and the maps need an internet connection. Maps use Leaflet and OpenStreetMap by default; no Google Maps key or billing setup is needed unless you opt in below. The core complaint workflow and local data storage run in the browser.
+The page loads Font Awesome, Google Fonts, Chart.js and Leaflet from CDNs, so those assets and the maps need an internet connection. Maps use Leaflet and OpenStreetMap by default; no Google Maps key or billing setup is needed unless you opt in below.
 
 ## Interactive maps without a Google API key
 
@@ -38,37 +38,23 @@ Google Maps requires a key and billing for a standard project, and usage can inc
 
 ## Demo flows
 
-- Submit a report as a guest and save the generated `CF-######` tracking number. Use Track complaint to inspect its progress.
+- Submit a report as a guest and save the generated `CF-############` tracking number. Use Track complaint to inspect its progress.
 - Choose the account button to open the resident dashboard. Guest reports appear there in the same browser.
-- Open `http://localhost:8000/admin` or choose Live dashboard, then enter the admin key `Kube_vertex` to access operations.
+- Open `http://localhost:8000/admin` or choose Admin. The local demo has no server authentication; on Vercel, the key is checked by the server using the `ADMIN_ACCESS_KEY` environment variable.
 - To sign in as a resident, choose the account button, select **Create account**, and register with your name, email, and a password of at least six characters. A 10-digit phone number is optional. Later, use the same email and password to sign in. Accounts are stored in this browser for the local demo.
 - Use address search, click/drag the map pin, or choose **Use My Current Location**. Location permission denial and unavailable-location errors have inline messages. Typing an address manually is also supported.
 
-## Data model
+## Connect shared complaint storage
 
-The browser store contains three JSON collections/objects:
+1. Create a Supabase project and open **SQL Editor**.
+2. Run the SQL in [`supabase/schema.sql`](supabase/schema.sql) to create the complaints table with row-level security enabled.
+3. In Supabase, copy the project URL and create a server-side **Secret key**.
+4. In Vercel, open the project’s **Settings → Environment Variables** and add these for Production and Preview:
+   - `SUPABASE_URL` — the Supabase project URL
+   - `SUPABASE_SECRET_KEY` — the Supabase secret key (or legacy service role key)
+   - `ADMIN_ACCESS_KEY` — the private admin key you choose
+5. Redeploy Vercel after adding the variables.
 
-- `civicflow.users.v1`: `{ id, fullName, email, phone, passcodeHash, createdAt }`
-- `civicflow.complaints.v1`: `{ id, userId, title, description, category, address, location, zone, latitude, longitude, status, department, createdAt }`
-- `civicflow.session.v1`: `{ userId }`
+Never put the Supabase secret/service role key in `app.js`, `maps-config.js`, or another browser-visible file. The API routes in `api/` use it only on the server. Public users can submit a complaint and look up an individual report by its tracking ID; only callers with the admin key can list all complaints or update their status and department.
 
-These fields are shaped like relational rows to make a future `fetch()` adapter straightforward. Complaint submissions now have a backend-ready JSON shape:
-
-```json
-{
-  "title": "Large pothole on Oak Street",
-  "description": "A large pothole is blocking part of the road.",
-  "category": "Roads",
-  "latitude": 40.7142,
-  "longitude": -74.0064,
-  "address": "Oak Street, Northside"
-}
-```
-
-It is exposed as `window.civicFlowBuildComplaintPayload(formData)`; no `fetch()` call was added because this workspace has no existing endpoint to call. After the FastAPI route and request model are available, call `fetch()` with this object and that confirmed route.
-
-The admin map displays coordinate-bearing local demo reports using status-colored markers. Its data loader is exposed as `window.civicFlowRenderAdminMap(records)` so an existing backend response can be passed in once the API is identified. Marker popups show only complaint ID, category, description, and status; the map does not show citizen name, email, or phone.
-
-The seeded reports render dashboards on first launch. Clear this site's local storage to reset to the original sample data.
-
-This is a hackathon frontend mock, not a production identity or authorization system. Real deployments should move identity, authorization, validation, storage and reporting endpoints behind a server API.
+Supabase's Free plan currently includes a 500 MB database and can pause projects after a week of inactivity; review [current plan limits](https://supabase.com/pricing). The local server still uses browser storage, while Vercel-hosted pages use the shared database API.
