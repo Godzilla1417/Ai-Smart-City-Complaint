@@ -1,0 +1,10 @@
+{
+  "name": "civicflow-smart-city",
+  "version": "1.0.0",
+  "private": true,
+  "description": "CivicFlow smart city complaint management demo",
+  "scripts": {
+    "dev": "node server.js",
+    "start": "node server.js"
+  }
+}
