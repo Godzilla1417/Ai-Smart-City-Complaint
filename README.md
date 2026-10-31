@@ -63,6 +63,14 @@ The `supabase/schema.sql` setup creates the private bucket, restricts its file s
 
 Local development without the shared API can still submit text reports using browser storage, but it cannot persist complaint photos. Use the deployed Vercel app with valid Supabase environment variables to test photo storage.
 
+### Admin proof of resolution
+
+In the admin portal, move a repaired report to **Awaiting Resolution Evidence**, open its details, and submit one to four after-repair photos with a description, completion time, and repair team. Images are resized in the browser, then checked again for actual image format and size by the server. Submission sets the complaint to **Pending Verification**; only the separate **Verify and resolve** action changes it to **Resolved**. A reviewer can return evidence with a note, and the admin audit trail retains each action.
+
+Residents can track a report using its report ID. Verified proof is shown there using short-lived signed links from the private bucket, with an interactive before/after slider when the original report included a photo. A category-themed reveal uses only the real submitted photos. The tracking view displays the verified update when the resident opens or refreshes the report; this project has no email or push notification provider configured.
+
+The admin portal uses one shared access key. Unless `ADMIN_ACTOR_ID` is configured, audit entries identify the actor as `shared-admin`; the shared key cannot distinguish individual staff members. The project also has no separate verifier role, so any authorized admin session can submit and verify evidence.
+
 Never put the Supabase secret/service role key in `app.js`, `maps-config.js`, or another browser-visible file. The API routes in `api/` use it only on the server. Public users can submit a complaint and look up an individual report by its tracking ID; only callers with the admin key can list all complaints or update their status and department.
 
 Supabase's Free plan currently includes a 500 MB database and can pause projects after a week of inactivity; review [current plan limits](https://supabase.com/pricing). The local server still uses browser storage, while Vercel-hosted pages use the shared database API.

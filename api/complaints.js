@@ -1,4 +1,4 @@
-const allowedStatuses = new Set(['Submitted', 'Under Review', 'In Progress', 'Resolved']);
+const allowedStatuses = new Set(['Submitted', 'Under Review', 'In Progress', 'Awaiting Resolution Evidence']);
 const allowedCategories = new Set(['Roads', 'Sanitation', 'Streetlights', 'Water', 'Public spaces', 'Other']);
 const { createHmac, timingSafeEqual } = require('node:crypto');
 const imageBucket = 'civic-complaint-images';
@@ -82,6 +82,16 @@ async function saveImage(dataUrl, complaintId) {
   return path;
 }
 
+async function signedImageUrl(path) {
+  if (!path) return null;
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const data = await storageRequest(`/object/sign/civic-complaint-images/${encodedPath}`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ expiresIn: 900 })
+  });
+  const { url } = storageConfig();
+  return data?.signedURL ? `${url}/storage/v1${data.signedURL}` : null;
+}
+
 async function databaseRequest(path, options = {}) {
   const { baseUrl, headers } = dbConfig();
   const response = await fetch(`${baseUrl}${path}`, {
@@ -112,7 +122,8 @@ function fromDatabase(row) {
     longitude: row.longitude,
     status: row.status,
     department: row.department || 'City Services',
-    createdAt: row.created_at
+    createdAt: row.created_at,
+    resolutionStatus: row.resolution_status || 'Awaiting Resolution Evidence'
   };
 }
 
@@ -122,16 +133,43 @@ module.exports = async function handler(req, res) {
       const id = String(req.query?.id || '').trim();
       if (id) {
         const query = new URLSearchParams({
-          select: 'id,title,category,location,address,zone,latitude,longitude,status,department,created_at',
+          select: 'id,title,description,category,location,address,zone,latitude,longitude,status,department,created_at,image_path,before_image_path,after_image_paths,resolution_description,resolution_completed_at,resolution_department,resolution_status,submitted_at,verified_at',
           id: `eq.${id}`,
           limit: '1'
         });
         const rows = await databaseRequest(`?${query}`);
-        return res.status(200).json(rows?.[0] ? fromDatabase(rows[0]) : null);
+        if (!rows?.[0]) return res.status(200).json(null);
+        const row = rows[0], record = fromDatabase(row);
+        record.beforeImageUrl = await signedImageUrl(row.before_image_path || row.image_path);
+        const verified = row.resolution_status === 'Verified' && row.status === 'Resolved';
+        record.afterImageUrls = verified ? await Promise.all((Array.isArray(row.after_image_paths) ? row.after_image_paths : []).map(signedImageUrl)) : [];
+        record.resolutionDescription = verified ? row.resolution_description : null;
+        record.resolutionCompletedAt = verified ? row.resolution_completed_at : null;
+        record.resolutionDepartment = verified ? row.resolution_department : null;
+        record.resolutionStatus = row.resolution_status || 'Awaiting Resolution Evidence';
+        record.submittedAt = verified ? row.submitted_at : null;
+        record.verifiedAt = verified ? row.verified_at : null;
+        return res.status(200).json(record);
       }
       if (!adminAuthorized(req)) return res.status(401).json({ error: 'Admin access required.' });
       const rows = await databaseRequest('?select=*&order=created_at.desc');
-      const records = await Promise.all((rows || []).map(async row => ({ ...fromDatabase(row), photoUrl: await signImage(row.image_path) })));
+      const records = await Promise.all((rows || []).map(async row => {
+        const verified = row.resolution_status === 'Verified' && row.status === 'Resolved';
+        return {
+          ...fromDatabase(row),
+          photoUrl: await signedImageUrl(row.image_path),
+          beforeImageUrl: await signedImageUrl(row.before_image_path || row.image_path),
+          resolutionDescription: row.resolution_description,
+          resolutionCompletedAt: row.resolution_completed_at,
+          resolutionDepartment: row.resolution_department,
+          resolutionStatus: row.resolution_status || 'Awaiting Resolution Evidence',
+          submittedByAdminId: row.submitted_by_admin_id,
+          submittedAt: row.submitted_at,
+          verifiedByAdminId: row.verified_by_admin_id,
+          verifiedAt: row.verified_at,
+          afterImageUrls: verified ? await Promise.all((Array.isArray(row.after_image_paths) ? row.after_image_paths : []).map(signedImageUrl)) : []
+        };
+      }));
       return res.status(200).json(records);
     }
 
@@ -189,6 +227,9 @@ module.exports = async function handler(req, res) {
       if (!id) return res.status(400).json({ error: 'Complaint ID is required.' });
       const update = {};
       if (body.status !== undefined) {
+        if (body.status === 'Resolved' || body.status === 'Pending Verification' || body.status === 'Returned for Additional Work') {
+          return res.status(409).json({ error: 'Resolution status changes require the proof review workflow.' });
+        }
         if (!allowedStatuses.has(body.status)) return res.status(400).json({ error: 'Invalid complaint status.' });
         update.status = body.status;
       }
@@ -199,6 +240,13 @@ module.exports = async function handler(req, res) {
       }
       if (!Object.keys(update).length) return res.status(400).json({ error: 'No supported fields to update.' });
       const query = new URLSearchParams({ id: `eq.${id}`, select: '*' });
+      if (update.status !== undefined) {
+        const existing = await databaseRequest(`?${new URLSearchParams({ select: 'id,status', id: `eq.${id}`, limit: '1' })}`);
+        if (!existing?.[0]) return res.status(404).json({ error: 'Complaint not found.' });
+        if (['Pending Verification', 'Returned for Additional Work', 'Resolved'].includes(existing[0].status)) {
+          return res.status(409).json({ error: 'This status can only change through the resolution verification workflow.' });
+        }
+      }
       const rows = await databaseRequest(`?${query}`, {
         method: 'PATCH',
         headers: { Prefer: 'return=representation' },
