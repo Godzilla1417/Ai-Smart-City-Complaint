@@ -55,6 +55,14 @@ Google Maps requires a key and billing for a standard project, and usage can inc
    - `ADMIN_ACCESS_KEY` — the private admin key you choose
 5. Redeploy Vercel after adding the variables.
 
+### Complaint photo uploads
+
+The complaint form accepts an optional JPEG, PNG, or WebP photo. The browser resizes the image and converts it to JPEG before upload (maximum 1.5 MB after compression; files over 15 MB are rejected). On Vercel, photos are stored in the private `civic-complaint-images` Supabase Storage bucket. Only authorized staff see a temporary **View photo** link in the admin report queue; public tracking responses do not include photo links.
+
+The `supabase/schema.sql` setup creates the private bucket, restricts its file size and allowed MIME types, and adds the nullable `image_path` column to `public.complaints`. If the complaints table already exists, run the updated schema in Supabase **SQL Editor** once to add the image column and bucket. Keep `SUPABASE_SECRET_KEY` (or the legacy service role key) in Vercel server-side environment variables only. After setup, redeploy the Vercel project and submit a report with an image to confirm uploads are working.
+
+Local development without the shared API can still submit text reports using browser storage, but it cannot persist complaint photos. Use the deployed Vercel app with valid Supabase environment variables to test photo storage.
+
 Never put the Supabase secret/service role key in `app.js`, `maps-config.js`, or another browser-visible file. The API routes in `api/` use it only on the server. Public users can submit a complaint and look up an individual report by its tracking ID; only callers with the admin key can list all complaints or update their status and department.
 
 Supabase's Free plan currently includes a 500 MB database and can pause projects after a week of inactivity; review [current plan limits](https://supabase.com/pricing). The local server still uses browser storage, while Vercel-hosted pages use the shared database API.
