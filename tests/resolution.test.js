@@ -135,6 +135,24 @@ test('multiple real-format photo uploads stay pending until a separate verificat
   assert.equal(res.data.resolutionStatus, 'Pending Verification');
 });
 
+test('verified complaints accept additional evidence and require verification again', async () => {
+  const row = { ...originalComplaint, status: 'Resolved', resolution_status: 'Verified', after_image_paths: ['proof/first-repair.jpg'], resolution_description: 'The damaged pipe section was replaced.', submitted_at: '2026-01-02T13:00:00.000Z', verified_at: '2026-01-03T09:00:00.000Z' };
+  const observed = {};
+  installSupabaseMock(row, observed);
+  const res = responseStub();
+  await resolutionHandler({
+    method: 'POST', query: { id: complaintId }, headers: { 'x-admin-token': adminToken() },
+    body: { action: 'submit', description: 'A follow-up photo confirms the curb was also restored.', department: 'Water Utilities Crew 2', completedAt: '2026-01-02T12:30:00.000Z', photos: [jpegData(0x21)] }
+  }, res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(observed.update.after_image_paths.slice(0, 1), ['proof/first-repair.jpg']);
+  assert.equal(observed.update.after_image_paths.length, 2);
+  assert.equal(observed.update.status, 'Pending Verification');
+  assert.equal(observed.update.resolution_status, 'Pending Verification');
+  assert.equal(observed.update.verified_at, null);
+  assert.equal(observed.audit.action, 'evidence_submitted');
+});
+
 test('verification records the reviewer and is the only path to Resolved', async () => {
   const row = { ...originalComplaint, status: 'Pending Verification', resolution_status: 'Pending Verification', after_image_paths: ['proof/repair.jpg'] };
   const observed = {};
