@@ -9,8 +9,6 @@ const sharedApiEnabled=location.protocol==='https:'&&!['localhost','127.0.0.1'].
 // ── Leaflet map instances ────────────────────────────────────────────────────
 let submitMap=null, submitMarker=null, submitMapProvider='osm', googleGeocoder=null, googleMapsLoadPromise=null;
 let adminLMap=null, adminLMarkers=[];
-let dispatchVehicleIcon=null, dispatchDestIcon=null;
-let dispatchVehicleLat=null, dispatchVehicleLng=null;
 // ── Shared selected location for submit form ─────────────────────────────────
 const selectedLocation={latitude:null,longitude:null,address:''};
 let nominatimQueue=Promise.resolve(),nominatimLastRequest=0;
@@ -77,8 +75,8 @@ async function trackComplaint(id){
   }
   renderTracking(record);
 }
-// --- Dispatch map state (tracking view) ---
-let dispatchMap=null,dispatchVehicleMarker=null,dispatchDestMarker=null,dispatchRafId=null;
+// --- Complaint-location map state (tracking view) ---
+let trackingMap=null,trackingMarker=null;
 
 function renderTracking(record){
   const target=document.querySelector('#tracking-result');
@@ -86,7 +84,7 @@ function renderTracking(record){
   const hasResolution=['Pending Verification','Returned for Additional Work','Resolved'].includes(record.status);
   const steps=['Submitted','Under Review','In Progress',...(record.status==='Awaiting Resolution Evidence'?['Awaiting Resolution Evidence']:hasResolution?[(record.status==='Returned for Additional Work'?'Returned for Additional Work':'Pending Verification'),'Resolved']:[])];
   const current=steps.indexOf(record.status);
-  const showDispatch=record.status==='In Progress'&&Number.isFinite(Number(record.latitude))&&Number.isFinite(Number(record.longitude));
+  const hasCoordinates=Number.isFinite(Number(record.latitude))&&Number.isFinite(Number(record.longitude))&&record.latitude!==null&&record.latitude!==''&&record.longitude!==null&&record.longitude!=='';
   const residentEvidence=(record.evidence||[]).filter(item=>item.ownerType==='citizen');
   const evidenceCards=residentEvidence.map(item=>`<figure class="citizen-evidence-card"><img src="${escapeHTML(item.imageUrl)}" alt="Photo submitted with this complaint"><figcaption><span>Submitted photo · ${formatDateTime(item.submittedAt)}</span>${item.deletionRequestStatus==='Pending'?'<strong>Deletion request pending review</strong>':''}${item.deletionRequestStatus==='In Review'?'<strong>Under retention review</strong>':''}${item.deletionRequestStatus==='Retained'?'<strong>Retained under the evidence policy</strong>':''}${item.deletionRequestStatus==='Escalated for Privacy Review'?'<strong>Escalated for privacy review</strong>':''}${item.evidenceStatus==='Active'&&item.deletionRequestStatus==='None'?`<button type="button" class="btn btn-outline btn-small" data-request-evidence-deletion="${escapeHTML(item.evidenceId)}" data-complaint-id="${escapeHTML(record.id)}">Request photo deletion</button>`:''}</figcaption></figure>`).join('');
   target.innerHTML=`<article class="tracking-card">
@@ -99,6 +97,7 @@ function renderTracking(record){
       <div class="stepper" style="--step-progress:${current<0?0:(current/(steps.length-1))*100}%">${steps.map((s,i)=>`<div class="step ${i<=current?'done':''} ${i===current?'current':''}"><span class="step-dot">${i<current?'<i class="fa-solid fa-check"></i>':i+1}</span>${s}</div>`).join('')}</div>
     <div class="tracking-meta"><span><i class="fa-solid fa-layer-group"></i> ${escapeHTML(record.category)}</span><span><i class="fa-solid fa-location-dot"></i> ${escapeHTML(record.zone||record.location)}</span><span><i class="fa-solid fa-building"></i> ${escapeHTML(record.department||'Awaiting assignment')}</span></div>
       <div class="tracking-description"><strong>Complaint details</strong><p>${escapeHTML(record.description||'No additional description was provided.')}</p></div>
+      <section class="tracking-location-panel" aria-labelledby="tracking-location-title"><div class="tracking-location-heading"><div><span class="eyebrow">REPORTED LOCATION</span><h3 id="tracking-location-title">Issue location</h3></div><span class="tracking-location-status"><i class="fa-solid fa-location-dot"></i> ${escapeHTML(record.location||record.zone||'Pinned location')}</span></div>${hasCoordinates?'<div id="tracking-location-map" class="tracking-location-map" role="region" aria-label="Map showing the complaint location"></div><p class="tracking-map-note"><i class="fa-solid fa-circle-info"></i> The pin marks where this issue was reported. It does not show live staff or vehicle locations.</p>':'<div class="tracking-map-unavailable"><i class="fa-solid fa-map-location-dot"></i><span>This report does not have map coordinates. Its location was recorded as text only.</span></div>'}</section>
       ${record.status==='Pending Verification'?'<div class="citizen-update pending"><i class="fa-solid fa-hourglass-half"></i> Repair evidence has been submitted and is awaiting administrator verification.</div>':''}
       ${record.status==='Returned for Additional Work'?'<div class="citizen-update pending"><i class="fa-solid fa-rotate-left"></i> The submitted repair evidence was returned for additional work.</div>':''}
       ${record.status==='Resolved'&&record.resolutionStatus==='Verified'?'<div class="citizen-update verified"><i class="fa-solid fa-bell"></i> Update: an administrator verified the repair evidence. Refresh this report any time to see the latest proof.</div>':''}
@@ -106,63 +105,25 @@ function renderTracking(record){
       ${sharedApiEnabled&&!record.hasPrivateEvidenceAccess?'<p class="private-evidence-hint"><i class="fa-solid fa-lock"></i> Secure photos are available in the browser where this report was submitted.</p>':''}
       ${renderResolutionProof(record)}
       <button type="button" class="btn btn-quiet refresh-tracking" data-action="refresh-tracking" data-id="${escapeHTML(record.id)}"><i class="fa-solid fa-rotate"></i> Refresh report</button>
-    ${showDispatch?`<div class="dispatch-panel"><div class="dispatch-header"><span class="dispatch-live-pill"><span class="dispatch-pulse-dot"></span>UNIT EN ROUTE</span><span class="dispatch-eta"><i class="fa-solid fa-truck-fast"></i> Service team dispatched</span></div><div id="tracking-dispatch-map" class="tracking-dispatch-map" aria-label="Live dispatch map"></div></div>`:''}
   </article>`;
-  if(dispatchRafId){cancelAnimationFrame(dispatchRafId);dispatchRafId=null}
-  if(dispatchMap){dispatchMap.remove();dispatchMap=null}
-  dispatchVehicleMarker=null;dispatchDestMarker=null;
+  if(trackingMap){trackingMap.remove();trackingMap=null}
+  trackingMarker=null;
   animateResolutionReveal(record);
-  if(showDispatch)initTrackingDispatchMap(record);
+  if(hasCoordinates)initTrackingLocationMap(record);
 }
 
-function initTrackingDispatchMap(record){
-  const mapEl=document.querySelector('#tracking-dispatch-map');
+function initTrackingLocationMap(record){
+  const mapEl=document.querySelector('#tracking-location-map');
   if(!mapEl)return;
-  const destLat=Number(record.latitude),destLng=Number(record.longitude);
-
-  dispatchMap=L.map(mapEl,{zoomControl:true,scrollWheelZoom:true}).setView([destLat,destLng],15);
-  const street=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',maxZoom:19});
-  street.addTo(dispatchMap);
-
-  // Destination marker — red pin
-  const destIcon=L.divIcon({className:'',html:'<span class="dispatch-dest-marker"><i class="fa-solid fa-location-dot"></i></span>',iconSize:[28,28],iconAnchor:[14,28]});
-  dispatchDestMarker=L.marker([destLat,destLng],{icon:destIcon,title:'Complaint location'}).addTo(dispatchMap);
-  dispatchDestMarker.bindPopup(`<strong>${escapeHTML(record.title)}</strong><br><small>${escapeHTML(record.location)}</small>`).openPopup();
-
-  // Vehicle marker — emoji + ring
-  const vehicleIcon=L.divIcon({className:'',html:'<div class="dispatch-vehicle-marker"><span class="dispatch-vehicle-icon">🛠️</span><span class="dispatch-vehicle-ring"></span></div>',iconSize:[44,44],iconAnchor:[22,22]});
-
-  const startAnimation=(startLat,startLng)=>{
-    if(dispatchVehicleMarker)dispatchMap.removeLayer(dispatchVehicleMarker);
-    dispatchVehicleMarker=L.marker([startLat,startLng],{icon:vehicleIcon,title:'Service vehicle',zIndexOffset:1000}).addTo(dispatchMap);
-
-    const bounds=L.latLngBounds([[startLat,startLng],[destLat,destLng]]);
-    dispatchMap.fitBounds(bounds,{padding:[40,40]});
-
-    const DURATION=5000;
-    const startTime=performance.now();
-    const lerp=(a,b,t)=>a+(b-a)*t;
-    const ease=t=>t<0.5?2*t*t:1-Math.pow(-2*t+2,2)/2;
-
-    const animate=(now)=>{
-      const t=ease(Math.min((now-startTime)/DURATION,1));
-      const curLat=lerp(startLat,destLat,t);
-      const curLng=lerp(startLng,destLng,t);
-      dispatchVehicleMarker.setLatLng([curLat,curLng]);
-      if(t<1){dispatchRafId=requestAnimationFrame(animate)}else{dispatchRafId=null}
-    };
-    dispatchRafId=requestAnimationFrame(animate);
-  };
-
-  if(navigator.geolocation){
-    navigator.geolocation.getCurrentPosition(
-      pos=>startAnimation(pos.coords.latitude+0.002,pos.coords.longitude+0.002),
-      ()=>startAnimation(destLat+0.018,destLng-0.012),
-      {enableHighAccuracy:false,timeout:6000}
-    );
-  }else{
-    startAnimation(destLat+0.018,destLng-0.012);
-  }
+  if(!window.L){mapEl.innerHTML='<div class="tracking-map-unavailable"><i class="fa-solid fa-triangle-exclamation"></i><span>The map could not load. The reported address is shown above.</span></div>';return}
+  const lat=Number(record.latitude),lng=Number(record.longitude);
+  trackingMap=L.map(mapEl,{zoomControl:true,scrollWheelZoom:false}).setView([lat,lng],15);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{attribution:'© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',maxZoom:19}).addTo(trackingMap);
+  const icon=L.divIcon({className:'',html:`<span class="tracking-map-pin status-${escapeHTML(statusClass(record.status).replace('status-',''))}"><span class="tracking-map-pin-ring"></span><i class="fa-solid fa-location-dot"></i></span>`,iconSize:[38,46],iconAnchor:[19,42]});
+  trackingMarker=L.marker([lat,lng],{icon,title:'Reported issue location'}).addTo(trackingMap);
+  trackingMarker.bindPopup(`<strong>${escapeHTML(record.title)}</strong><br><small>${escapeHTML(record.location||record.zone||'Reported location')}</small>`);
+  if(window.matchMedia('(prefers-reduced-motion: reduce)').matches){trackingMarker.openPopup()}
+  requestAnimationFrame(()=>trackingMap?.invalidateSize());
 }
 function generateId(){let id;do{const digits=new Uint8Array(12);crypto.getRandomValues(digits);id=`CF-${[...digits].map(digit=>digit%10).join('')}`}while(findComplaint(id));return id}
 function buildComplaintPayload(data){return{title:String(data.get('title')||'').trim(),description:String(data.get('description')||'').trim(),category:String(data.get('category')||''),latitude:selectedLocation.latitude,longitude:selectedLocation.longitude,address:selectedLocation.address||String(data.get('location')||'').trim()}}
