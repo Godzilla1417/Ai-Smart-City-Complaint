@@ -1,6 +1,7 @@
 const allowedStatuses = new Set(['Submitted', 'Under Review', 'In Progress', 'Resolved']);
 const allowedCategories = new Set(['Roads', 'Sanitation', 'Streetlights', 'Water', 'Public spaces', 'Other']);
 const { createHmac, timingSafeEqual } = require('node:crypto');
+const imageBucket = 'civic-complaint-images';
 
 function adminAuthorized(req) {
   const expected = process.env.ADMIN_ACCESS_KEY;
@@ -18,12 +19,67 @@ function adminAuthorized(req) {
 
 function dbConfig() {
   const url = process.env.SUPABASE_URL;
-  const key = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  // Vercel values pasted from dashboards may include surrounding whitespace/newlines.
+  // Trim those before using the value in an HTTP header.
+  const key = String(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   if (!url || !key) throw new Error('Shared complaint storage is not configured.');
   const headers = { apikey: key, 'Content-Type': 'application/json' };
   // The legacy service_role key is a JWT; current sb_secret keys are not.
   if (key.startsWith('eyJ')) headers.Authorization = `Bearer ${key}`;
   return { baseUrl: `${url.replace(/\/$/, '')}/rest/v1/complaints`, headers };
+}
+
+function storageConfig() {
+  const url = process.env.SUPABASE_URL;
+  const key = String(process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  if (!url || !key) throw new Error('Shared complaint storage is not configured.');
+  const headers = { apikey: key };
+  if (key.startsWith('eyJ')) headers.Authorization = `Bearer ${key}`;
+  return { url: url.replace(/\/$/, ''), headers };
+}
+
+async function storageRequest(path, options = {}) {
+  const { url, headers } = storageConfig();
+  const response = await fetch(`${url}/storage/v1${path}`, {
+    ...options,
+    headers: { ...headers, ...(options.headers || {}) }
+  });
+  const text = await response.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+  if (!response.ok) {
+    console.error('Supabase image storage request failed:', response.status, data);
+    throw new Error('Image storage is not ready. Run the storage setup SQL in Supabase, then try again.');
+  }
+  return data;
+}
+
+async function signImage(path) {
+  if (!path) return null;
+  const encodedPath = path.split('/').map(encodeURIComponent).join('/');
+  const data = await storageRequest(`/object/sign/${imageBucket}/${encodedPath}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expiresIn: 900 })
+  });
+  return data?.signedURL ? `${storageConfig().url}/storage/v1${data.signedURL}` : null;
+}
+
+async function saveImage(dataUrl, complaintId) {
+  if (!dataUrl) return null;
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+=*)$/.exec(dataUrl);
+  if (!match) throw new Error('Choose a JPEG, PNG, or WebP image.');
+  const bytes = Buffer.from(match[2], 'base64');
+  if (!bytes.length || bytes.length > 1_500_000) throw new Error('Image must be smaller than 1.5 MB after compression.');
+  const mime = match[1];
+  const extension = mime === 'image/jpeg' ? 'jpg' : mime.split('/')[1];
+  const path = `${complaintId}/${require('node:crypto').randomBytes(12).toString('hex')}.${extension}`;
+  await storageRequest(`/object/${imageBucket}/${path.split('/').map(encodeURIComponent).join('/')}`, {
+    method: 'POST',
+    headers: { 'Content-Type': mime, 'x-upsert': 'false', 'Cache-Control': '3600' },
+    body: bytes
+  });
+  return path;
 }
 
 async function databaseRequest(path, options = {}) {
@@ -75,7 +131,8 @@ module.exports = async function handler(req, res) {
       }
       if (!adminAuthorized(req)) return res.status(401).json({ error: 'Admin access required.' });
       const rows = await databaseRequest('?select=*&order=created_at.desc');
-      return res.status(200).json((rows || []).map(fromDatabase));
+      const records = await Promise.all((rows || []).map(async row => ({ ...fromDatabase(row), photoUrl: await signImage(row.image_path) })));
+      return res.status(200).json(records);
     }
 
     if (req.method === 'POST') {
@@ -107,11 +164,21 @@ module.exports = async function handler(req, res) {
         department: String(body.department || 'City Services'),
         created_at: new Date().toISOString()
       };
-      const rows = await databaseRequest('?select=*', {
-        method: 'POST',
-        headers: { Prefer: 'return=representation' },
-        body: JSON.stringify(record)
-      });
+      if (body.image) record.image_path = await saveImage(body.image, record.id);
+      let rows;
+      try {
+        rows = await databaseRequest('?select=*', {
+          method: 'POST',
+          headers: { Prefer: 'return=representation' },
+          body: JSON.stringify(record)
+        });
+      } catch (error) {
+        if (record.image_path) {
+          try { await storageRequest(`/object/${imageBucket}/${record.image_path.split('/').map(encodeURIComponent).join('/')}`, { method: 'DELETE' }); }
+          catch (cleanupError) { console.error('Could not remove orphaned complaint image:', cleanupError); }
+        }
+        throw error;
+      }
       return res.status(201).json(fromDatabase(rows[0]));
     }
 

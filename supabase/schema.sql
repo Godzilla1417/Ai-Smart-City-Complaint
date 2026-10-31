@@ -11,8 +11,18 @@ create table if not exists public.complaints (
   longitude double precision,
   status text not null default 'Submitted',
   department text not null default 'City Services',
+  image_path text,
   created_at timestamptz not null default now()
 );
+
+alter table public.complaints add column if not exists image_path text;
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('civic-complaint-images', 'civic-complaint-images', false, 1572864, array['image/jpeg', 'image/png', 'image/webp'])
+on conflict (id) do update set
+  public = false,
+  file_size_limit = excluded.file_size_limit,
+  allowed_mime_types = excluded.allowed_mime_types;
 
 alter table public.complaints enable row level security;
 revoke all on table public.complaints from anon, authenticated;
