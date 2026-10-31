@@ -81,8 +81,33 @@ async function getComplaint(id) {
 async function audit(id, action, details) {
   await request('database', 'complaint_resolution_audit', {
     method: 'POST', headers: { Prefer: 'return=minimal' },
-    body: JSON.stringify({ complaint_id: id, action, actor_admin_id: actorId(), details })
+    body: JSON.stringify({ complaint_id: id, action, actor_admin_id: actorId(), actor_type: 'admin', actor_id: actorId(), details })
   });
+}
+
+async function evidenceRows(id, paths, description, ownerId) {
+  for (const imagePath of paths) await request('database', 'complaint_evidence', {
+    method: 'POST', headers: { Prefer: 'return=minimal' },
+    body: JSON.stringify({ complaint_id: id, evidence_owner_type: 'admin', evidence_owner_id: ownerId, evidence_image_path: imagePath, evidence_description: description || null, evidence_submitted_at: new Date().toISOString() })
+  });
+}
+
+async function removeEvidenceRows(id, paths) {
+  for (const imagePath of paths) {
+    const query = new URLSearchParams({ complaint_id: `eq.${id}`, evidence_image_path: `eq.${imagePath}` });
+    try { await request('database', `complaint_evidence?${query}`, { method: 'DELETE' }); }
+    catch (error) { console.error('Could not roll back evidence ledger row:', error); }
+  }
+}
+
+async function rollbackComplaint(id, query, row) {
+  await request('database', `complaints?${query}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({
+    status: row.status, resolution_status: row.resolution_status, before_image_path: row.before_image_path,
+    after_image_paths: row.after_image_paths, resolution_description: row.resolution_description,
+    resolution_completed_at: row.resolution_completed_at, resolution_department: row.resolution_department,
+    submitted_by_admin_id: row.submitted_by_admin_id, submitted_at: row.submitted_at,
+    verified_by_admin_id: row.verified_by_admin_id, verified_at: row.verified_at
+  }) });
 }
 
 async function publicProof(row) {
@@ -113,6 +138,14 @@ async function adminRecord(row) {
     beforePath ? signedUrl(beforePath) : null,
     Promise.all(afterPaths.map(signedUrl))
   ]);
+  const evidenceQuery = new URLSearchParams({ select: 'evidence_id,evidence_owner_type,evidence_owner_id,evidence_image_path,evidence_description,evidence_submitted_at,evidence_status,deletion_request_status', complaint_id: `eq.${row.id}`, order: 'evidence_submitted_at.asc' });
+  const evidence = await request('database', `complaint_evidence?${evidenceQuery}`);
+  const evidenceRecords = await Promise.all((evidence || []).map(async item => ({
+    evidenceId: item.evidence_id, ownerType: item.evidence_owner_type, ownerId: item.evidence_owner_id,
+    imageUrl: await signedUrl(item.evidence_image_path), description: item.evidence_description,
+    submittedAt: item.evidence_submitted_at, status: item.evidence_status,
+    deletionRequestStatus: item.deletion_request_status
+  })));
   return {
     beforeImageUrl, afterImageUrls,
     resolutionDescription: row.resolution_description,
@@ -122,7 +155,8 @@ async function adminRecord(row) {
     submittedByAdminId: row.submitted_by_admin_id,
     submittedAt: row.submitted_at,
     verifiedByAdminId: row.verified_by_admin_id,
-    verifiedAt: row.verified_at
+    verifiedAt: row.verified_at,
+    evidenceRecords
   };
 }
 
@@ -152,6 +186,7 @@ module.exports = async function handler(req, res) {
     const action = String(body.action || '');
     let update, eventAction, details;
     const uploadedPaths = [];
+    let replacementEvidence = null, replacementEvidenceId = null, replacementPath = null;
 
     if (action === 'submit') {
       if (!['In Progress', 'Awaiting Resolution Evidence', 'Returned for Additional Work'].includes(row.status)) {
@@ -173,7 +208,7 @@ module.exports = async function handler(req, res) {
         for (const photo of photos) uploadedPaths.push(await uploadImage(id, photo));
         update = {
           before_image_path: row.image_path || null,
-          after_image_paths: uploadedPaths,
+          after_image_paths: [...(Array.isArray(row.after_image_paths) ? row.after_image_paths : []), ...uploadedPaths],
           resolution_description: description,
           resolution_completed_at: completedAt,
           resolution_department: department,
@@ -203,6 +238,40 @@ module.exports = async function handler(req, res) {
       if (note.length < 5 || note.length > 1000) return res.status(400).json({ error: 'Add a return note between 5 and 1,000 characters.' });
       update = { resolution_status: 'Returned for Additional Work', status: 'Returned for Additional Work' };
       eventAction = 'returned_for_work'; details = { note };
+    } else if (action === 'replace') {
+      const evidenceId = String(body.evidenceId || '').trim(), reason = String(body.reason || '').trim();
+      if (!/^[0-9a-f-]{36}$/i.test(evidenceId) || reason.length < 5 || reason.length > 1000) return res.status(400).json({ error: 'Choose resolution evidence and explain the correction in 5 to 1,000 characters.' });
+      if (!['Pending Verification', 'Verified'].includes(row.resolution_status)) return res.status(409).json({ error: 'Only submitted resolution evidence can be corrected.' });
+      const evidenceQuery = new URLSearchParams({ select: '*', evidence_id: `eq.${evidenceId}`, complaint_id: `eq.${id}`, limit: '1' });
+      replacementEvidence = (await request('database', `complaint_evidence?${evidenceQuery}`))?.[0];
+      if (!replacementEvidence || replacementEvidence.evidence_owner_type !== 'admin' || replacementEvidence.evidence_status !== 'Active') return res.status(403).json({ error: 'Only active administrator resolution evidence can be replaced.' });
+      const oldPaths = Array.isArray(row.after_image_paths) ? row.after_image_paths : [];
+      if (!oldPaths.includes(replacementEvidence.evidence_image_path)) return res.status(409).json({ error: 'This image is no longer in the complaint’s active resolution evidence.' });
+      replacementPath = await uploadImage(id, body.photo);
+      uploadedPaths.push(replacementPath);
+      let inserted;
+      try {
+        inserted = await request('database', 'complaint_evidence?select=evidence_id', {
+          method: 'POST', headers: { Prefer: 'return=representation' },
+          body: JSON.stringify({ complaint_id: id, evidence_owner_type: 'admin', evidence_owner_id: actorId(), evidence_image_path: replacementPath, evidence_description: `Correction: ${reason}`, evidence_submitted_at: now })
+        });
+      } catch (error) {
+        try { await request('storage', `/object/${bucket}/${replacementPath.split('/').map(encodeURIComponent).join('/')}`, { method: 'DELETE' }); } catch (cleanupError) { console.error('Could not clean up unregistered replacement image:', cleanupError); }
+        throw error;
+      }
+      replacementEvidenceId = inserted?.[0]?.evidence_id;
+      if (!replacementEvidenceId) {
+        try { await request('database', `complaint_evidence?${new URLSearchParams({ complaint_id: `eq.${id}`, evidence_image_path: `eq.${replacementPath}` })}`, { method: 'DELETE' }); } catch {}
+        try { await request('storage', `/object/${bucket}/${replacementPath.split('/').map(encodeURIComponent).join('/')}`, { method: 'DELETE' }); } catch {}
+        throw new Error('The replacement photo was uploaded but its evidence record could not be created.');
+      }
+      update = {
+        after_image_paths: oldPaths.map(path => path === replacementEvidence.evidence_image_path ? replacementPath : path),
+        resolution_description: `${String(row.resolution_description || '').trim()}\nCorrection: ${reason}`.trim(),
+        resolution_status: 'Pending Verification', status: 'Pending Verification',
+        submitted_by_admin_id: actorId(), submitted_at: now, verified_by_admin_id: null, verified_at: null
+      };
+      eventAction = 'evidence_replaced'; details = { evidence_id: evidenceId, replacement_evidence_id: replacementEvidenceId, reason };
     } else {
       return res.status(400).json({ error: 'Choose submit, verify, or return.' });
     }
@@ -213,7 +282,23 @@ module.exports = async function handler(req, res) {
       updated = await request('database', `complaints?${query}`, {
         method: 'PATCH', headers: { Prefer: 'return=representation' }, body: JSON.stringify(update)
       });
+      if (action === 'submit') await evidenceRows(id, uploadedPaths, details.description, actorId());
+      if (action === 'replace') await request('database', `complaint_evidence?evidence_id=eq.${replacementEvidence.evidence_id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ evidence_status: 'Replaced', replaced_by_evidence_id: replacementEvidenceId }) });
     } catch (error) {
+      if (action === 'submit' && uploadedPaths.length) {
+        await removeEvidenceRows(id, uploadedPaths);
+        try { await request('database', `complaints?${query}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ status: row.status, resolution_status: row.resolution_status, before_image_path: row.before_image_path, after_image_paths: row.after_image_paths, resolution_description: row.resolution_description, resolution_completed_at: row.resolution_completed_at, resolution_department: row.resolution_department, submitted_by_admin_id: row.submitted_by_admin_id, submitted_at: row.submitted_at, verified_by_admin_id: row.verified_by_admin_id, verified_at: row.verified_at }) }); }
+        catch (rollbackError) { console.error('Could not roll back complaint after evidence registration failure:', rollbackError); }
+      }
+      if (action === 'replace') {
+        if (updated?.[0]) try { await rollbackComplaint(id, query, row); } catch (rollbackError) { console.error('Could not roll back replacement complaint:', rollbackError); }
+        if (replacementEvidenceId) {
+          try { await request('database', `complaint_evidence?evidence_id=eq.${replacementEvidenceId}`, { method: 'DELETE' }); } catch (rollbackError) { console.error('Could not remove incomplete replacement ledger row:', rollbackError); }
+        }
+        if (replacementEvidence?.evidence_id) {
+          try { await request('database', `complaint_evidence?evidence_id=eq.${replacementEvidence.evidence_id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ evidence_status: 'Active', replaced_by_evidence_id: null }) }); } catch (rollbackError) { console.error('Could not restore replaced photo record:', rollbackError); }
+        }
+      }
       for (const path of uploadedPaths) {
         try { await request('storage', `/object/${bucket}/${path.split('/').map(encodeURIComponent).join('/')}`, { method: 'DELETE' }); }
         catch (cleanupError) { console.error('Could not clean up resolution photo:', cleanupError); }
@@ -224,21 +309,14 @@ module.exports = async function handler(req, res) {
     try {
       await audit(id, eventAction, details);
     } catch (error) {
-      await request('database', `complaints?${query}`, {
-        method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({
-          status: row.status,
-          resolution_status: row.resolution_status,
-          before_image_path: row.before_image_path,
-          after_image_paths: row.after_image_paths,
-          resolution_description: row.resolution_description,
-          resolution_completed_at: row.resolution_completed_at,
-          resolution_department: row.resolution_department,
-          submitted_by_admin_id: row.submitted_by_admin_id,
-          submitted_at: row.submitted_at,
-          verified_by_admin_id: row.verified_by_admin_id,
-          verified_at: row.verified_at
-        })
-      });
+      await rollbackComplaint(id, query, row);
+      if (action === 'submit') await removeEvidenceRows(id, uploadedPaths);
+      if (action === 'replace') {
+        try {
+          await request('database', `complaint_evidence?evidence_id=eq.${replacementEvidence.evidence_id}`, { method: 'PATCH', headers: { Prefer: 'return=minimal' }, body: JSON.stringify({ evidence_status: 'Active', replaced_by_evidence_id: null }) });
+          if (replacementEvidenceId) await request('database', `complaint_evidence?evidence_id=eq.${replacementEvidenceId}`, { method: 'DELETE' });
+        } catch (rollbackError) { console.error('Could not restore replacement evidence after audit failure:', rollbackError); }
+      }
       for (const path of uploadedPaths) {
         try { await request('storage', `/object/${bucket}/${path.split('/').map(encodeURIComponent).join('/')}`, { method: 'DELETE' }); }
         catch (cleanupError) { console.error('Could not clean up resolution photo after audit rollback:', cleanupError); }

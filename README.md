@@ -57,20 +57,32 @@ Google Maps requires a key and billing for a standard project, and usage can inc
 
 ### Complaint photo uploads
 
-The complaint form accepts an optional JPEG, PNG, or WebP photo. The browser resizes the image and converts it to JPEG before upload (maximum 1.5 MB after compression; files over 15 MB are rejected). On Vercel, photos are stored in the private `civic-complaint-images` Supabase Storage bucket. Only authorized staff see a temporary **View photo** link in the admin report queue; public tracking responses do not include photo links.
+The complaint form accepts an optional JPEG, PNG, or WebP photo. The browser resizes the image and converts it to JPEG before upload (maximum 1.5 MB after compression; files over 15 MB are rejected). On Vercel, photos are stored in the private `civic-complaint-images` Supabase Storage bucket. Staff receive short-lived signed links. Residents receive private evidence links only when their browser presents the random report access key issued at submission.
 
 The `supabase/schema.sql` setup creates the private bucket, restricts its file size and allowed MIME types, and adds the nullable `image_path` column to `public.complaints`. If the complaints table already exists, run the updated schema in Supabase **SQL Editor** once to add the image column and bucket. Keep `SUPABASE_SECRET_KEY` (or the legacy service role key) in Vercel server-side environment variables only. After setup, redeploy the Vercel project and submit a report with an image to confirm uploads are working.
 
 Local development without the shared API can still submit text reports using browser storage, but it cannot persist complaint photos. Use the deployed Vercel app with valid Supabase environment variables to test photo storage.
 
-### Admin proof of resolution
+### Automated priority triage
+
+New reports receive a transparent rule-based recommendation using the complaint text, category and stated location context. It assigns Critical, High, Medium or Low, explains the text that influenced the result, suggests a department and response target, and reports a confidence indicator. It does not infer an affected population unless the report states one. This version does not use a third-party AI model and does not interpret image pixels; treat the recommendation as a triage aid and let authorized staff adjust it. Priority changes preserve the original recommendation and add an audit event.
+
+In the admin queue, use the priority, category, department and status filters, change a report's priority from its row, or sort highest-first. The resident tracking view and dashboard show the recommendation and explanation; private administrator identity and audit data stay in the admin portal.
+
+### Admin proof of resolution and evidence management
 
 In the admin portal, move a repaired report to **Awaiting Resolution Evidence**, open its details, and submit one to four after-repair photos with a description, completion time, and repair team. Images are resized in the browser, then checked again for actual image format and size by the server. Submission sets the complaint to **Pending Verification**; only the separate **Verify and resolve** action changes it to **Resolved**. A reviewer can return evidence with a note, and the admin audit trail retains each action.
 
-Residents can track a report using its report ID. Verified proof is shown there using short-lived signed links from the private bucket, with an interactive before/after slider when the original report included a photo. A category-themed reveal uses only the real submitted photos. The tracking view displays the verified update when the resident opens or refreshes the report; this project has no email or push notification provider configured.
+Residents can track report status using its report ID. Verified proof is shown using short-lived signed links from the private bucket, with an interactive before/after slider when the original report included a photo. A category-themed reveal uses only the submitted photos. The report's random access key is saved in that browser so only its owner can view photos or request review of a citizen-submitted photo. If the key is cleared or a resident moves to another browser, private evidence access cannot be recovered through the current local-only account system.
+
+Resolution photos are kept in a separate evidence ledger from citizen-submitted photos. Admins can add resolution photos and correct one using **Replace** with a required reason. Replacement retains the previous image and audit entry, then sends the report back to **Pending Verification**. There is no API delete operation for resolution evidence. A citizen can request review of their own submitted photo after a confirmation prompt; the request is audited, the file stays attached while reviewed, and admins can retain it or escalate it for an authorized privacy review. The app does not permanently delete evidence automatically. Define and follow the city's retention policy before deciding that an image should be removed.
+
+The tracking view displays verified updates when residents open or refresh a report; this project has no email or push notification provider configured.
 
 The admin portal uses one shared access key. Unless `ADMIN_ACTOR_ID` is configured, audit entries identify the actor as `shared-admin`; the shared key cannot distinguish individual staff members. The project also has no separate verifier role, so any authorized admin session can submit and verify evidence.
 
-Never put the Supabase secret/service role key in `app.js`, `maps-config.js`, or another browser-visible file. The API routes in `api/` use it only on the server. Public users can submit a complaint and look up an individual report by its tracking ID; only callers with the admin key can list all complaints or update their status and department.
+Never put the Supabase secret/service role key in `app.js`, `maps-config.js`, or another browser-visible file. The API routes in `api/` use it only on the server. The submitted report ID provides status lookup; the separate random access key gates private evidence. Only callers with the admin key can list all complaints or update their status, department and priority.
+
+Run `npm test` to run the API and priority workflow tests before deploying. After modifying `supabase/schema.sql`, execute the full script in Supabase SQL Editor, then deploy the updated Vercel branch.
 
 Supabase's Free plan currently includes a 500 MB database and can pause projects after a week of inactivity; review [current plan limits](https://supabase.com/pricing). The local server still uses browser storage, while Vercel-hosted pages use the shared database API.
